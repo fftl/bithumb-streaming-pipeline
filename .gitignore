@@ -1,0 +1,53 @@
+# ==========================================
+# 1. 파이썬 환경 및 캐시 (Python / venv)
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ==========================================
+# 2. 스트리밍 데이터 및 스토리지 (Lakehouse Data)
+# ==========================================
+# Parquet 원천 데이터 및 집계 데이터 적재 경로 제외
+storage/raw_trades/
+storage/aggregated/
+storage/**/*.parquet
+
+# Spark 내부 메타데이터 및 체크포인트 로그 제외
+storage/checkpoints/
+**/_spark_metadata/
+
+# ==========================================
+# 3. 런타임 로그 및 프로세스 관리 파일 (Runtime / Logs)
+# ==========================================
+*.log
+*.pid
+ingestion/*.log
+ingestion/*.pid
+processing/*.log
+processing/*.pid
+
+# Spark / Derby 메타스토어 로컬 캐시
+metastore_db/
+derby.log
+spark-warehouse/
+
+# ==========================================
+# 4. 환경 변수 및 보안 파일 (Secrets)
+# ==========================================
+.env
+*.env.local
+
+# ==========================================
+# 5. IDE 및 OS 메타데이터
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
