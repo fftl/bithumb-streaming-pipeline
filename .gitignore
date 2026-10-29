@@ -51,3 +51,14 @@ spark-warehouse/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ==========================================
+# Airflow Runtime & Metadata
+# ==========================================
+airflow/logs/
+airflow/*.db
+airflow/*.cfg
+airflow/*.pid
+airflow/webserver_config.py
+terminal_*.log
+clean_terminal.txt
