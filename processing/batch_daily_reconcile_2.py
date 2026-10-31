@@ -1,4 +1,7 @@
+import os
 import sys
+import json
+from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, min as spark_min, max as spark_max, sum as spark_sum, count as spark_count,
@@ -18,7 +21,10 @@ def create_spark_session() -> SparkSession:
 
 def main():
     target_date = sys.argv[1] if len(sys.argv) > 1 else "2026-10-29"
-    data_path = f"/home/ubuntu/bithumb-streaming-pipeline/storage/raw_trades/date={target_date}"
+    
+    # 프로젝트 루트 경로 자동 설정
+    project_root = Path(__file__).resolve().parent.parent
+    data_path = f"{project_root}/storage/raw_trades/date={target_date}"
 
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
@@ -54,7 +60,7 @@ def main():
     print(f" - 총 체결 거래대금      : {quality_df['total_krw_amount']:,.0f} KRW")
     print(f" - 결측/이상치 레코드 수 : {quality_df['null_event_time'] + quality_df['invalid_price'] + quality_df['invalid_qty']} 건\n")
 
-    # 2. 시간대별 체결 분포 (천 단위 쉼표 포맷 적용)
+    # 2. 시간대별 체결 분포
     print("2. [Hourly Tick Distribution & Volume]")
     hourly_summary = raw_df.groupBy("hour") \
         .agg(
@@ -68,7 +74,7 @@ def main():
 
     hourly_summary.show(24, truncate=False)
 
-    # 3. 1분 OHLCV 캔들 샘플 (천 단위 쉼표 포맷 적용)
+    # 3. 1분 OHLCV 캔들 집계
     print("3. [Batch 1-Minute OHLCV Candles (Sample 5 rows)]")
     batch_ohlcv = raw_df.groupBy(
         col("symbol"),
@@ -89,16 +95,16 @@ def main():
     ).orderBy("candle_start")
 
     batch_ohlcv.show(5, truncate=False)
+    candle_count = batch_ohlcv.count()
 
     # 4. KST 보정 레이턴시 계산
     print("4. [Network & Ingestion Health Analysis]")
-    # ingest_timestamp(ms) -> KST 초 단위 변환 후 event_time과 차이 계산
     latency_df = raw_df.withColumn(
         "event_time_epoch",
         unix_timestamp(col("event_time"))
     ).withColumn(
         "latency_sec",
-        (col("ingest_timestamp") / 1000.0) - col("event_time_epoch") + 32400 #레이턴시 수치 1로 맞추기
+        (col("ingest_timestamp") / 1000.0) - col("event_time_epoch") + 32400
     )
 
     latency_stats = latency_df.select(
@@ -114,9 +120,34 @@ def main():
     gap_df = raw_df.withColumn("prev_event_time", lag("event_time", 1).over(window_spec)) \
         .withColumn("tick_gap_sec", unix_timestamp(col("event_time")) - unix_timestamp(col("prev_event_time")))
 
-    max_gap = gap_df.select(spark_max("tick_gap_sec").alias("max_gap")).collect()[0]["max_gap"]
+    max_gap_row = gap_df.select(spark_max("tick_gap_sec").alias("max_gap")).collect()[0]
+    max_gap = max_gap_row["max_gap"] if max_gap_row["max_gap"] is not None else 0.0
     print(f" - 최대 틱 수신 간격      : {max_gap:.1f} 초")
     print("\n=======================================================\n")
+
+    # ========================================================
+    # 5. Airflow 알림 연동용 요약 JSON 저장
+    # ========================================================
+    report_dir = project_root / "storage/reconcile_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = report_dir / f"summary_{target_date}.json"
+
+    summary_data = {
+        "target_date": target_date,
+        "status": "SUCCESS",
+        "total_ticks": f"{total_ticks:,}",
+        "total_amount": f"{quality_df['total_krw_amount']:,.0f}" if quality_df['total_krw_amount'] else "0",
+        "generated_candles": f"{candle_count:,}",
+        "missing_candles": max(0, 1440 - candle_count),
+        "avg_latency": f"{latency_stats['avg_latency_sec']:.3f}" if latency_stats['avg_latency_sec'] is not None else "0.000",
+        "max_latency": f"{latency_stats['max_latency_sec']:.3f}" if latency_stats['max_latency_sec'] is not None else "0.000",
+        "max_gap": f"{max_gap:.1f}"
+    }
+
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary_data, f, ensure_ascii=False, indent=2)
+
+    print(f"[INFO] Reconciliation summary successfully saved to: {summary_path}")
 
     spark.stop()
 

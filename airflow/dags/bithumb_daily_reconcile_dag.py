@@ -1,61 +1,82 @@
 from datetime import datetime, timedelta
+import pendulum
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+
+local_tz = pendulum.timezone("Asia/Seoul")
 
 default_args = {
     "owner": "fftl",
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 2,
+    "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
-
-PIPELINE_ROOT = "/home/ubuntu/bithumb-streaming-pipeline"
-VENV_PYTHON = f"{PIPELINE_ROOT}/.venv/bin/python"
-SCRIPT_PATH = f"{PIPELINE_ROOT}/processing/batch_daily_reconcile_2.py"
-STORAGE_ROOT = f"{PIPELINE_ROOT}/storage/raw_trades"
 
 with DAG(
     dag_id="bithumb_daily_reconciliation",
     default_args=default_args,
-    description="매일 새벽 전일자 빗썸 비트코인 원천 틱 데이터 품질 검증 및 배치 정산",
+    description="매일 새벽 01:00 KST 전일자 24시간 원천 틱 데이터 정산, 품질 검증 및 이메일 리포트",
     schedule_interval="0 1 * * *",
-    start_date=datetime(2026, 10, 28),
+    start_date=datetime(2026, 10, 28, tzinfo=local_tz),
     catchup=False,
-    max_active_runs=1,
-    tags=["crypto", "bithumb", "spark", "batch"],
+    tags=["bithumb", "crypto", "batch", "reconciliation"],
 ) as dag:
 
-    # 1. 대상 날짜 Parquet 파티션 디렉토리 검사
-    # Jinja 템플릿({{ ds }})을 env로 넘겨 f-string 충돌을 방지
+    # Task 1: 전일자 원천 Parquet 파티션 존재 여부 검증
     check_raw_partition = BashOperator(
         task_id="check_raw_partition_exists",
-        env={"TARGET_DATE": "{{ ds }}"},
-        bash_command=f"""
-        TARGET_DIR="{STORAGE_ROOT}/date=$TARGET_DATE"
+        bash_command="""
+        TARGET_DATE="{{ macros.ds_add(ds, -1) }}"
+        PARTITION_DIR="/home/ubuntu/bithumb-streaming-pipeline/storage/raw_trades/date=${TARGET_DATE}"
         
-        echo "[INFO] Checking raw partition directory: $TARGET_DIR"
-        if [ ! -d "$TARGET_DIR" ]; then
-            echo "[ERROR] Raw trades partition does not exist: $TARGET_DIR"
+        echo "[INFO] Checking existence of partition directory: ${PARTITION_DIR}"
+        if [ ! -d "${PARTITION_DIR}" ]; then
+            echo "[ERROR] Partition directory for ${TARGET_DATE} does not exist!"
             exit 1
         fi
         
-        FILE_COUNT=$(ls -1 "$TARGET_DIR"/*/*.parquet 2>/dev/null | wc -l)
-        echo "[INFO] Found $FILE_COUNT parquet files in $TARGET_DIR"
-        
-        if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "[ERROR] No parquet files found in target partition!"
+        FILE_COUNT=$(find "${PARTITION_DIR}" -type f -name "*.parquet" | wc -l)
+        if [ "${FILE_COUNT}" -eq 0 ]; then
+            echo "[ERROR] No parquet files found in ${PARTITION_DIR}!"
             exit 1
         fi
+        
+        echo "[INFO] Validation passed: Found ${FILE_COUNT} parquet files for ${TARGET_DATE}."
+        exit 0
         """,
     )
 
-    # 2. PySpark 배치 정산 스크립트 실행
+    # Task 2: 전일자 24시간 PySpark 정산 배치 실행 (요약 JSON 파일 생성)
     run_daily_reconcile = BashOperator(
         task_id="run_daily_reconcile_job",
-        env={"TARGET_DATE": "{{ ds }}"},
-        bash_command=f"{VENV_PYTHON} {SCRIPT_PATH} $TARGET_DATE",
+        bash_command="""
+        PROJECT_ROOT="/home/ubuntu/bithumb-streaming-pipeline"
+        cd "${PROJECT_ROOT}"
+        source .venv/bin/activate
+        
+        TARGET_DATE="{{ macros.ds_add(ds, -1) }}"
+        echo "[INFO] Running daily batch reconciliation for target date: ${TARGET_DATE}"
+        
+        python processing/batch_daily_reconcile_2.py "${TARGET_DATE}"
+        """,
     )
 
-    check_raw_partition >> run_daily_reconcile
+    # Task 3: 정산 결과 요약 JSON 기반 일일 브리핑 이메일 자동 발송
+    send_reconcile_email = BashOperator(
+        task_id="send_reconcile_email_job",
+        bash_command="""
+        PROJECT_ROOT="/home/ubuntu/bithumb-streaming-pipeline"
+        cd "${PROJECT_ROOT}"
+        source .venv/bin/activate
+        
+        TARGET_DATE="{{ macros.ds_add(ds, -1) }}"
+        echo "[INFO] Sending reconciliation email report for: ${TARGET_DATE}"
+        
+        python monitoring/alert_email.py "${TARGET_DATE}"
+        """,
+    )
+
+    # 태스크 순차 체이닝
+    check_raw_partition >> run_daily_reconcile >> send_reconcile_email

@@ -61,4 +61,4 @@ airflow/*.cfg
 airflow/*.pid
 airflow/webserver_config.py
 terminal_*.log
-clean_terminal.txt
+clean_terminal.txt.env
