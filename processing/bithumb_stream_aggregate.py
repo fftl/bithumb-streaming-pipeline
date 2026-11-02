@@ -1,106 +1,91 @@
-import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, from_json, to_timestamp, window,
+    col, from_json, to_timestamp, window, struct, current_timestamp, date_format,
     min as spark_min, max as spark_max, sum as spark_sum, count as spark_count,
-    expr
 )
-from pyspark.sql.types import (
-    StructType, StructField, StringType, DoubleType, LongType
-)
+from pyspark.sql.types import StructType, StructField, StringType, LongType, DoubleType
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_PATH = f"{PROJECT_ROOT}/storage/ohlcv_1m"
+CHECKPOINT_PATH = f"{PROJECT_ROOT}/storage/checkpoints/ohlcv_1m"
 
 def create_spark_session() -> SparkSession:
-    """Phase 4와 자원을 분할 점유하도록 2코어로 제한한 SparkSession"""
-    return SparkSession.builder \
-        .appName("Bithumb-1Min-OHLCV-Aggregator") \
-        .master("local[2]") \
-        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1") \
-        .config("spark.sql.shuffle.partitions", "2") \
-        .config("spark.driver.memory", "2g") \
-        .getOrCreate()
+    return (SparkSession.builder
+        .appName("Bithumb-1Min-OHLCV-Aggregator")
+        .master("local[2]")
+        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.driver.memory", "2g")
+        .config("spark.sql.session.timeZone", "Asia/Seoul")   # 3. 타임존 명시
+        .getOrCreate())
+
+trade_schema = StructType([
+    StructField("symbol", StringType()), StructField("contPrice", StringType()),
+    StructField("contQty", StringType()), StructField("contAmt", StringType()),
+    StructField("contDtm", StringType()), StructField("ingest_timestamp", LongType()),
+])
 
 def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
 
-    # 1. 빗썸 수신 틱 스키마 정의
-    trade_schema = StructType([
-        StructField("symbol", StringType(), True),
-        StructField("buySellGb", StringType(), True),
-        StructField("contPrice", StringType(), True),
-        StructField("contQty", StringType(), True),
-        StructField("contAmt", StringType(), True),
-        StructField("contDtm", StringType(), True),
-        StructField("updn", StringType(), True),
-        StructField("ingest_timestamp", LongType(), True)
-    ])
+    raw = (spark.readStream.format("kafka")
+        .option("kafka.bootstrap.servers", "localhost:9092")
+        .option("subscribe", "bithumb-trades")
+        .option("startingOffsets", "latest")
+        .option("failOnDataLoss", "false")
+        .load())
 
-    # 2. Kafka 스트림 연결 (현재 유입 시점부터 실시간 모니터링)
-    raw_kafka_df = spark.readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "localhost:9092") \
-        .option("subscribe", "bithumb-trades") \
-        .option("startingOffsets", "latest") \
-        .option("failOnDataLoss", "false") \
-        .load()
-
-    # 3. 역직렬화 및 Event Time 캐스팅
-    trades_df = raw_kafka_df \
-        .selectExpr("CAST(key AS STRING) as trade_symbol", "CAST(value AS STRING) as json_payload") \
+    trades = (raw
         .select(
-            col("trade_symbol"),
-            from_json(col("json_payload"), trade_schema).alias("data")
-        ) \
+            col("key").cast("string").alias("symbol"),
+            from_json(col("value").cast("string"), trade_schema).alias("d"),
+            col("offset").alias("kafka_offset"),                 # 4. 동률 보조 키
+        )
         .select(
-            col("trade_symbol").alias("symbol"),
-            col("data.contPrice").cast(DoubleType()).alias("price"),
-            col("data.contQty").cast(DoubleType()).alias("quantity"),
-            col("data.contAmt").cast(DoubleType()).alias("amount"),
-            to_timestamp(col("data.contDtm"), "yyyy-MM-dd HH:mm:ss.SSSSSS").alias("event_time")
-        ) \
-        .filter(col("event_time").isNotNull())
+            "symbol", "kafka_offset",
+            col("d.contPrice").cast(DoubleType()).alias("price"),
+            col("d.contQty").cast(DoubleType()).alias("quantity"),
+            col("d.contAmt").cast(DoubleType()).alias("amount"),
+            to_timestamp(col("d.contDtm"), "yyyy-MM-dd HH:mm:ss.SSSSSS").alias("event_time"),
+        )
+        .filter(col("event_time").isNotNull()))
 
-    # 4. 30초 늦은 데이터 허용 워터마크
-    watermarked_trades = trades_df \
+    ohlcv = (trades
         .withWatermark("event_time", "30 seconds")
-
-    # 5. 1분 텀블링 윈도우 OHLCV 집계
-    ohlcv_df = watermarked_trades \
-        .groupBy(
-            col("symbol"),
-            window(col("event_time"), "1 minute")
-        ) \
+        .groupBy(col("symbol"), window(col("event_time"), "1 minute"))
         .agg(
-            expr("min_by(price, event_time)").alias("open"),
+            spark_min(struct("event_time", "kafka_offset", "price")).alias("_first"),
+            spark_max(struct("event_time", "kafka_offset", "price")).alias("_last"),
             spark_max("price").alias("high"),
             spark_min("price").alias("low"),
-            expr("max_by(price, event_time)").alias("close"),
             spark_sum("quantity").alias("volume"),
             spark_sum("amount").alias("total_amount"),
-            spark_count("*").alias("trade_count")
-        ) \
+            spark_count("*").alias("trade_count"),
+        )
         .select(
-            col("symbol"),
+            "symbol",
             col("window.start").alias("window_start"),
             col("window.end").alias("window_end"),
-            col("open"),
-            col("high"),
-            col("low"),
-            col("close"),
-            col("volume"),
-            col("total_amount"),
-            col("trade_count")
-        )
+            col("_first.price").alias("open"), "high", "low",
+            col("_last.price").alias("close"),
+            "volume", "total_amount", "trade_count",
+            col("_first.event_time").alias("first_event_time"),   # 6. 감사 컬럼
+            col("_last.event_time").alias("last_event_time"),
+            current_timestamp().alias("processed_at"),
+            date_format(col("window.start"), "yyyy-MM-dd").alias("date"),
+        ))
 
-    # 6. 실시간 콘솔 출력 (10초마다 갱신된 윈도우 행만 출력)
-    query = ohlcv_df.writeStream \
-        .outputMode("update") \
-        .format("console") \
-        .option("truncate", "false") \
-        .trigger(processingTime="10 seconds") \
-        .start()
+    query = (ohlcv.writeStream
+        .format("parquet")
+        .outputMode("append")                                      # 1. 확정 캔들만 기록
+        .option("path", OUTPUT_PATH)
+        .option("checkpointLocation", CHECKPOINT_PATH)             # 2. 체크포인트
+        .partitionBy("date")
+        .trigger(processingTime="1 minute")                        # 5. 소형 파일 완화
+        .start())
 
-    print("[INFO] Structured Streaming Aggregator started. Processing 1-min candles...")
     query.awaitTermination()
 
 if __name__ == "__main__":
