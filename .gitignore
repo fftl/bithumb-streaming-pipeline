@@ -62,3 +62,4 @@ airflow/*.pid
 airflow/webserver_config.py
 terminal_*.log
 clean_terminal.txt.env
+storage/reconcile_reports/
