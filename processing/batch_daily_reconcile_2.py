@@ -6,7 +6,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, min as spark_min, max as spark_max, sum as spark_sum, count as spark_count,
     avg as spark_avg, window, expr, to_date, lag, round as spark_round,
-    format_number, unix_timestamp, to_utc_timestamp
+    format_number, unix_timestamp, to_utc_timestamp, when, lit
 )
 from pyspark.sql.window import Window
 
@@ -18,6 +18,25 @@ def create_spark_session() -> SparkSession:
         .config("spark.driver.memory", "2g") \
         .config("spark.sql.session.timeZone", "Asia/Seoul") \
         .getOrCreate()
+
+def normalize_event_time(df):
+    """
+    레거시 행(Phase 2 이전 적재분)의 event_time을 실제 체결 시각으로 보정.
+    - 이전 원천 싱크는 세션 타임존 미지정(UTC)으로 KST 문자열을 파싱하여
+      event_time이 실제보다 9시간 늦은 시각(instant)으로 저장됨
+    - Phase 2부터 kafka_offset 컬럼이 함께 저장되므로, 이 컬럼이 NULL이면 레거시로 판정
+    - date/hour 파티션 값(KST 벽시계 기준)은 두 시기 모두 동일하므로 보정 불필요
+    """
+    if "kafka_offset" not in df.columns:          # 레거시 파일만 존재하는 일자
+        df = df.withColumn("kafka_offset", lit(None).cast("long"))
+    is_legacy = col("kafka_offset").isNull()
+    return df \
+        .withColumn("is_legacy", is_legacy) \
+        .withColumn(
+            "event_time",
+            when(is_legacy, col("event_time") - expr("INTERVAL 9 HOURS"))
+            .otherwise(col("event_time"))
+        )
 
 def main():
     target_date = sys.argv[1] if len(sys.argv) > 1 else "2026-10-29"
@@ -33,7 +52,10 @@ def main():
     print(f" [Bithumb Daily Reconciliation Report: {target_date}]")
     print(f"=======================================================\n")
 
-    raw_df = spark.read.parquet(data_path)
+    # 레거시/신규 파일의 스키마가 다르므로 mergeSchema 필요
+    raw_df = normalize_event_time(
+        spark.read.option("mergeSchema", "true").parquet(data_path)
+    )
     total_ticks = raw_df.count()
 
     if total_ticks == 0:
@@ -97,14 +119,12 @@ def main():
     batch_ohlcv.show(5, truncate=False)
     candle_count = batch_ohlcv.count()
 
-    # 4. KST 보정 레이턴시 계산
+    # 4. 인제스천 레이턴시 계산 (event_time 정규화로 +32400 보정 불필요)
+    #    cast("double")은 마이크로초까지 유지 (unix_timestamp는 초 단위 절삭)
     print("4. [Network & Ingestion Health Analysis]")
     latency_df = raw_df.withColumn(
-        "event_time_epoch",
-        unix_timestamp(col("event_time"))
-    ).withColumn(
         "latency_sec",
-        (col("ingest_timestamp") / 1000.0) - col("event_time_epoch") + 32400
+        (col("ingest_timestamp") / 1000.0) - col("event_time").cast("double")
     )
 
     latency_stats = latency_df.select(
@@ -118,7 +138,7 @@ def main():
     # 최대 수신 간격
     window_spec = Window.partitionBy("symbol").orderBy("event_time")
     gap_df = raw_df.withColumn("prev_event_time", lag("event_time", 1).over(window_spec)) \
-        .withColumn("tick_gap_sec", unix_timestamp(col("event_time")) - unix_timestamp(col("prev_event_time")))
+        .withColumn("tick_gap_sec", col("event_time").cast("double") - col("prev_event_time").cast("double"))
 
     max_gap_row = gap_df.select(spark_max("tick_gap_sec").alias("max_gap")).collect()[0]
     max_gap = max_gap_row["max_gap"] if max_gap_row["max_gap"] is not None else 0.0
