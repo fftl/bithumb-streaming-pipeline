@@ -15,12 +15,7 @@ __pycache__/
 # 2. 스트리밍 데이터 및 스토리지 (Lakehouse Data)
 # ==========================================
 # Parquet 원천 데이터 및 집계 데이터 적재 경로 제외
-storage/raw_trades/
-storage/aggregated/
-storage/**/*.parquet
-
-# Spark 내부 메타데이터 및 체크포인트 로그 제외
-storage/checkpoints/
+storage/
 **/_spark_metadata/
 
 # ==========================================
@@ -62,4 +57,4 @@ airflow/*.pid
 airflow/webserver_config.py
 terminal_*.log
 clean_terminal.txt.env
-storage/reconcile_reports/
+storage/
