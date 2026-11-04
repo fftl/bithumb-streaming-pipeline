@@ -140,7 +140,7 @@ if __name__ == "__main__":
         with open(summary_file, "r", encoding="utf-8") as f:
             report_data = json.load(f)
 
-        send_reconciliation_email(
+        sent = send_reconciliation_email(
             target_date=report_data.get("target_date", target_date),
             status=report_data.get("status", "SUCCESS"),
             details=report_data,
@@ -149,7 +149,7 @@ if __name__ == "__main__":
         print(
             f"[WARN] Summary file not found: {summary_file}. Sending failure alert."
         )
-        send_reconciliation_email(
+        sent = send_reconciliation_email(
             target_date=target_date,
             status="FAILED",
             details={
@@ -162,3 +162,6 @@ if __name__ == "__main__":
                 "max_gap": "N/A",
             },
         )
+
+    # 발송 실패 시 Airflow Task도 실패로 표시되도록 종료 코드 반환
+    sys.exit(0 if sent else 1)

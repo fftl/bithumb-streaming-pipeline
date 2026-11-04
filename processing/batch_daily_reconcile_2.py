@@ -6,7 +6,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, min as spark_min, max as spark_max, sum as spark_sum, count as spark_count,
     avg as spark_avg, window, expr, to_date, lag, round as spark_round,
-    format_number, unix_timestamp, to_utc_timestamp, when, lit
+    format_number, unix_timestamp, to_utc_timestamp, when, lit, date_format
 )
 from pyspark.sql.window import Window
 
@@ -68,8 +68,9 @@ def main():
         spark_count(expr("CASE WHEN event_time IS NULL THEN 1 END")).alias("null_event_time"),
         spark_count(expr("CASE WHEN price <= 0 THEN 1 END")).alias("invalid_price"),
         spark_count(expr("CASE WHEN quantity <= 0 THEN 1 END")).alias("invalid_qty"),
-        spark_min("event_time").alias("first_trade_dtm"),
-        spark_max("event_time").alias("last_trade_dtm"),
+        # collect()는 서버 로컬 시간대(UTC)로 변환하므로, Spark 안에서 KST 문자열로 만들어 꺼냄
+        date_format(spark_min("event_time"), "yyyy-MM-dd HH:mm:ss.SSSSSS").alias("first_trade_dtm"),
+        date_format(spark_max("event_time"), "yyyy-MM-dd HH:mm:ss.SSSSSS").alias("last_trade_dtm"),
         spark_sum("quantity").alias("total_btc_volume"),
         spark_sum("amount").alias("total_krw_amount")
     ).collect()[0]
