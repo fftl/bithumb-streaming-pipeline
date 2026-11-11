@@ -5,12 +5,15 @@ import time
 from kafka import KafkaProducer
 import websockets
 
+#logging 설정
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("BithumbProducer")
 
+#TOPIC 설정
+#키는 BTC_KRW으로 설정
 KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 KAFKA_TOPIC = "bithumb-trades"
 BITHUMB_WS_URL = "wss://pubwss.bithumb.com/pub/ws"
@@ -19,6 +22,7 @@ SUBSCRIPTION_PAYLOAD = {
     "symbols": ["BTC_KRW"]
 }
 
+#카프카 producer 생성 함수
 def create_kafka_producer() -> KafkaProducer:
     """처리량 극대화와 신뢰성을 고려한 KafkaProducer 인스턴스 초기화"""
     return KafkaProducer(
@@ -32,6 +36,7 @@ def create_kafka_producer() -> KafkaProducer:
         max_in_flight_requests_per_connection=5
     )
 
+#카프카 프로듀서 생성 및 실행
 async def stream_bithumb_to_kafka():
     producer = create_kafka_producer()
     backoff_seconds = 1
