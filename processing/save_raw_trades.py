@@ -49,6 +49,7 @@ def main():
         .option("subscribe", "bithumb-trades") \
         .option("startingOffsets", "earliest") \
         .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", 200000) \
         .load()
 
     # 3. 역직렬화 + Kafka 메타데이터 보존 + 파티셔닝 컬럼 추출
