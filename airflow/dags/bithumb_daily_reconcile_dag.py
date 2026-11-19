@@ -67,7 +67,7 @@ with DAG(
         
         echo "[INFO] Running daily batch reconciliation for target date: ${TARGET_DATE}"
         
-        python processing/batch_daily_reconcile_2.py "${TARGET_DATE}"
+        python processing/batch_daily_reconcile.py "${TARGET_DATE}"
         """,
     )
 

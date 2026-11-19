@@ -36,7 +36,7 @@
 ### 3. 1분봉 집계 — `processing/bithumb_stream_aggregate.py`
 
 
-### 4. 일일 정산과 리포트 — `airflow/dags/`, `processing/batch_daily_reconcile_2.py`, `monitoring/alert_email.py`
+### 4. 일일 정산과 리포트 — `airflow/dags/`, `processing/batch_daily_reconcile.py`, `monitoring/alert_email.py`
 
 
 <br>
